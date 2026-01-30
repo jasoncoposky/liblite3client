@@ -7,9 +7,7 @@
 #include <string_view>
 #include <system_error>
 #include <variant>
-
-// We use nlohmann/json for the 'Serializable' concept and object support
-#include <nlohmann/json.hpp>
+#include <vector>
 
 #include <buffer.hpp>
 
@@ -70,20 +68,6 @@ public:
   operator bool() const { return has_value(); }
 };
 
-// --- Concepts ---
-
-// Concept for types that nlohmann::json can serialize
-template <typename T>
-concept Serializable = requires(T a) {
-  { nlohmann::json(a) } -> std::convertible_to<nlohmann::json>;
-};
-
-// Concept for types that nlohmann::json can deserialize
-template <typename T>
-concept Deserializable = requires(const nlohmann::json &j, T &a) {
-  { j.get_to(a) };
-};
-
 // --- Forward Declarations ---
 class ClientImpl;
 
@@ -100,21 +84,8 @@ public:
   KeyProxy(Client &c, std::string_view k) : client_(c), key_(k) {}
 
   // Assignment -> PUT
-  // If PUT fails, this might throw or logging error depending on preference.
-  // For a map-like feel, we usually expect it to "just work" or throw exception
-  // on critical failure.
-  template <Serializable T>
-    requires(!std::convertible_to<T, std::string_view>)
-  KeyProxy &operator=(const T &val);
-
   // Overload for string types to bypass JSON serialization (efficient & safe)
   KeyProxy &operator=(std::string_view val);
-
-  // Casting -> GET
-  template <Deserializable T> operator T() const;
-
-  // Explicit conversion helper
-  template <Deserializable T> T as() const;
 };
 
 class Client {
@@ -142,32 +113,6 @@ public:
   Result<lite3cpp::Buffer> get(std::string_view key);
   Result<void> del(std::string_view key);
 
-  // JSON Object operations
-  template <Serializable T>
-    requires(!std::convertible_to<T, std::string_view>)
-  Result<void> put(std::string_view key, const T &obj) {
-    try {
-      nlohmann::json j = obj;
-      return put(key, j.dump());
-    } catch (const std::exception &e) {
-      return Error{ErrorCode::SerializationError, e.what()};
-    }
-  }
-
-  template <Deserializable T> Result<T> get_as(std::string_view key) {
-    auto res = get(key);
-    if (!res)
-      return res.error();
-
-    try {
-      auto j = nlohmann::json::parse(res.value());
-      T obj = j.get<T>();
-      return obj;
-    } catch (const std::exception &e) {
-      return Error{ErrorCode::SerializationError, e.what()};
-    }
-  }
-
   // Helper to check existence
   bool contains(std::string_view key) { return get(key).has_value(); }
 
@@ -179,17 +124,6 @@ public:
 
 // --- Implementations of Proxy templates ---
 
-template <Serializable T>
-  requires(!std::convertible_to<T, std::string_view>)
-KeyProxy &KeyProxy::operator=(const T &val) {
-  auto res = client_.put(key_, val);
-  if (!res) {
-    throw std::runtime_error("Lite3 Client Error (PUT " + key_ +
-                             "): " + res.error().message);
-  }
-  return *this;
-}
-
 inline KeyProxy &KeyProxy::operator=(std::string_view val) {
   auto res = client_.put(key_, val);
   if (!res) {
@@ -197,19 +131,6 @@ inline KeyProxy &KeyProxy::operator=(std::string_view val) {
                              "): " + res.error().message);
   }
   return *this;
-}
-
-template <Deserializable T> KeyProxy::operator T() const {
-  auto res = client_.get_as<T>(key_);
-  if (!res) {
-    throw std::runtime_error("Lite3 Client Error (GET " + key_ +
-                             "): " + res.error().message);
-  }
-  return res.value();
-}
-
-template <Deserializable T> T KeyProxy::as() const {
-  return static_cast<T>(*this);
 }
 
 } // namespace lite3

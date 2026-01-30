@@ -33,10 +33,10 @@ endif()
 
 target_include_directories(lite3client PUBLIC
     include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lite3-cpp/include
 )
 
 target_link_libraries(lite3client PUBLIC
-    nlohmann_json
     ws2_32
     crypt32
     # Bcrypt needed for some Boost.Asio randomness on Windows sometimes, safer to add
