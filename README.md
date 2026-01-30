@@ -5,14 +5,14 @@ A modern C++20 client library for the **Lite3** Key-Value Service.
 ## Features
 - **Modern API**: Python-like `db["key"]` syntax for ease of use.
 - **High Performance**: Built on `Boost.Beast` for robust, asynchronous networking.
-- **Efficient**: Zero-copy raw string API (`put`, `get`) bypasses serialization overhead.
-- **Type-Safe**: Template support for JSON object serialization (via `nlohmann/json`).
+- **Zero-Parse**: Raw `lite3cpp::Buffer` API bypasses all JSON parsing overhead.
+- **Efficient**: Zero-copy raw string API (`put`, `get`) and `patch_str` support.
 - **Reliable**: Automatic connection management and error handling.
 
 ## Requirements
 - C++20 compatible compiler
 - Boost (Asio, Beast)
-- nlohmann/json
+- lite3-cpp (for Buffer API)
 
 ## Usage
 
