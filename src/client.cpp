@@ -31,24 +31,24 @@ public:
   // Helper to perform a single request
   // Beast is lower-level; we need to connect, write, read.
   // Ideally we keep the connection open (Keep-Alive).
-  Result<std::string> perform_request(http::verb method,
-                                      std::string_view target,
-                                      std::string_view body = "") {
+  Result<std::vector<uint8_t>>
+  perform_request(http::verb method, std::string_view target,
+                  const std::vector<uint8_t> &body = {}) {
     try {
       // Check if connected, if not connect.
-      // For simplicity in this first pass, we might reconnect every time or try
-      // to reuse. Let's try to reuse, but handle disconnection.
       if (!stream_.socket().is_open()) {
         connect();
       }
 
       // Set up an HTTP request message
-      http::request<http::string_body> req{method, std::string(target), 11};
+      http::request<http::vector_body<uint8_t>> req{method, std::string(target),
+                                                    11};
       req.set(http::field::host, host_);
       req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
       req.set(http::field::content_type, "application/octet-stream");
+      req.keep_alive(true);
       if (!body.empty()) {
-        req.body() = std::string(body);
+        req.body() = body;
         req.prepare_payload();
       } else {
         req.prepare_payload();
@@ -61,14 +61,14 @@ public:
       beast::flat_buffer buffer;
 
       // Declare a container to hold the response
-      http::response<http::string_body> res;
+      http::response<http::vector_body<uint8_t>> res;
 
       // Receive the HTTP response
       http::read(stream_, buffer, res);
 
       // Handle status codes
       if (res.result() == http::status::ok) {
-        return res.body();
+        return std::move(res.body());
       } else if (res.result() == http::status::not_found) {
         return Error{ErrorCode::NotFound, "Key not found"};
       } else {
@@ -91,6 +91,7 @@ public:
   void connect() {
     auto const results = resolver_.resolve(host_, port_);
     stream_.connect(results);
+    stream_.socket().set_option(tcp::no_delay(true));
   }
 
   // Explicitly close
@@ -116,16 +117,30 @@ Result<void> Client::put(std::string_view key, std::string_view value) {
   std::string path = "/kv/";
   path.append(key);
 
-  auto res = impl_->perform_request(http::verb::put, path, value);
+  std::vector<uint8_t> vec(value.begin(), value.end());
+  auto res = impl_->perform_request(http::verb::put, path, vec);
   if (!res) {
-    // If it was a network error, maybe retry once?
-    // simple implementation for now.
     return Result<void>(res.error());
   }
   return Result<void>();
 }
 
-Result<std::string> Client::get(std::string_view key) {
+Result<void> Client::put(std::string_view key, const lite3cpp::Buffer &buf) {
+  if (key.empty())
+    return Error{ErrorCode::BadRequest, "Key cannot be empty"};
+  std::string path = "/kv/";
+  path.append(key);
+
+  // Buffer data is already a vector<uint8_t>
+  std::vector<uint8_t> vec(buf.data(), buf.data() + buf.size());
+  auto res = impl_->perform_request(http::verb::put, path, vec);
+  if (!res) {
+    return Result<void>(res.error());
+  }
+  return Result<void>();
+}
+
+Result<lite3cpp::Buffer> Client::get(std::string_view key) {
   if (key.empty())
     return Error{ErrorCode::BadRequest, "Key cannot be empty"};
   std::string path = "/kv/";
@@ -134,7 +149,7 @@ Result<std::string> Client::get(std::string_view key) {
   auto res = impl_->perform_request(http::verb::get, path);
   if (!res)
     return res.error();
-  return res.value();
+  return lite3cpp::Buffer(std::move(res.value()));
 }
 
 Result<void> Client::del(std::string_view key) {
@@ -163,6 +178,23 @@ Result<void> Client::patch_int(std::string_view key, std::string_view field,
   path.append(key);
   path += "?op=set_int&field=" + std::string(field) +
           "&val=" + std::to_string(value);
+
+  auto res = impl_->perform_request(http::verb::post, path);
+  if (!res)
+    return Result<void>(res.error());
+  return Result<void>();
+}
+
+Result<void> Client::patch_str(std::string_view key, std::string_view field,
+                               std::string_view value) {
+  if (key.empty())
+    return Error{ErrorCode::BadRequest, "Key cannot be empty"};
+
+  std::string path = "/kv/";
+  path.append(key);
+  // Simple URL parameter construction (assuming safe characters for benchmark)
+  path +=
+      "?op=set_str&field=" + std::string(field) + "&val=" + std::string(value);
 
   auto res = impl_->perform_request(http::verb::post, path);
   if (!res)

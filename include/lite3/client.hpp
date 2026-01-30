@@ -11,6 +11,8 @@
 // We use nlohmann/json for the 'Serializable' concept and object support
 #include <nlohmann/json.hpp>
 
+#include <buffer.hpp>
+
 namespace lite3 {
 
 // --- Error Handling ---
@@ -136,7 +138,8 @@ public:
 
   // Raw String/Bytes operations
   Result<void> put(std::string_view key, std::string_view value);
-  Result<std::string> get(std::string_view key);
+  Result<void> put(std::string_view key, const lite3cpp::Buffer &buf);
+  Result<lite3cpp::Buffer> get(std::string_view key);
   Result<void> del(std::string_view key);
 
   // JSON Object operations
@@ -170,6 +173,8 @@ public:
 
   Result<void> patch_int(std::string_view key, std::string_view field,
                          int64_t value);
+  Result<void> patch_str(std::string_view key, std::string_view field,
+                         std::string_view value);
 };
 
 // --- Implementations of Proxy templates ---
