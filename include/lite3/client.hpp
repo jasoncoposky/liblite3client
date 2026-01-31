@@ -120,6 +120,11 @@ public:
                          int64_t value);
   Result<void> patch_str(std::string_view key, std::string_view field,
                          std::string_view value);
+
+  // Advanced / Internal
+  Result<std::vector<uint8_t>> impl_raw_get(std::string_view path);
+
+private:
 };
 
 // --- Implementations of Proxy templates ---

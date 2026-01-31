@@ -21,6 +21,7 @@ endif()
 
 add_library(lite3client STATIC
     src/client.cpp
+    src/smart_client.cpp
 )
 
 if(EXISTS "${BOOST_ROOT}")
@@ -40,7 +41,8 @@ target_link_libraries(lite3client PUBLIC
     ws2_32
     crypt32
     # Bcrypt needed for some Boost.Asio randomness on Windows sometimes, safer to add
-    bcrypt 
+    bcrypt
+    nlohmann_json 
 )
 
 # Testing

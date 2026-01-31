@@ -5,6 +5,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
+#include <iostream>
 #include <string>
 
 namespace beast = boost::beast; // from <boost/beast.hpp>
@@ -28,15 +29,48 @@ public:
       : host_(host), port_(std::to_string(port)), ioc_(), resolver_(ioc_),
         stream_(ioc_) {}
 
+  // Helper to parse URL: http://host:port/path
+  // Very basic for internal redirects
+  bool parse_location(const std::string &loc, std::string &out_host,
+                      int &out_port, std::string &out_target) {
+    if (loc.rfind("http://", 0) != 0)
+      return false;
+    auto host_start = loc.begin() + 7;
+    auto port_sep = std::find(host_start, loc.end(), ':');
+    if (port_sep == loc.end())
+      return false;
+    auto path_sep = std::find(port_sep, loc.end(), '/');
+
+    out_host = std::string(host_start, port_sep);
+    std::string port_str(port_sep + 1, path_sep);
+    try {
+      out_port = std::stoi(port_str);
+    } catch (...) {
+      return false;
+    }
+
+    if (path_sep != loc.end())
+      out_target = std::string(path_sep, loc.end());
+    else
+      out_target = "/";
+    return true;
+  }
+
   // Helper to perform a single request
   // Beast is lower-level; we need to connect, write, read.
   // Ideally we keep the connection open (Keep-Alive).
   Result<std::vector<uint8_t>>
   perform_request(http::verb method, std::string_view target,
-                  const std::vector<uint8_t> &body = {}) {
+                  const std::vector<uint8_t> &body = {}, int depth = 0) {
+    if (depth > 5) {
+      return Error{ErrorCode::NetworkError, "Too many redirects"};
+    }
+
     try {
       // Check if connected, if not connect.
       if (!stream_.socket().is_open()) {
+        // std::cout << "Client: Reconnecting to " << host_ << ":" << port_ <<
+        // "\n"; // DEBUG
         connect();
       }
 
@@ -69,6 +103,24 @@ public:
       // Handle status codes
       if (res.result() == http::status::ok) {
         return std::move(res.body());
+      } else if (res.result() == http::status::temporary_redirect) {
+        // Follow Redirect
+        auto loc_it = res.find(http::field::location);
+        if (loc_it != res.end()) {
+          std::string location(loc_it->value());
+          std::string new_host;
+          int new_port = 0;
+          std::string new_target;
+          if (parse_location(location, new_host, new_port, new_target)) {
+            // Create one-off client to follow redirect
+            // We don't want to close OUR connection.
+            ClientImpl temp_client(new_host, new_port);
+            return temp_client.perform_request(method, new_target, body,
+                                               depth + 1);
+          }
+        }
+        return Error{ErrorCode::ServerError, "Invalid Redirect Location"};
+
       } else if (res.result() == http::status::not_found) {
         return Error{ErrorCode::NotFound, "Key not found"};
       } else {
@@ -200,6 +252,13 @@ Result<void> Client::patch_str(std::string_view key, std::string_view field,
   if (!res)
     return Result<void>(res.error());
   return Result<void>();
+}
+
+Result<std::vector<uint8_t>> Client::impl_raw_get(std::string_view path) {
+  auto res = impl_->perform_request(http::verb::get, path);
+  if (!res)
+    return res.error();
+  return std::move(res.value());
 }
 
 } // namespace lite3
