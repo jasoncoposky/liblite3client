@@ -1,5 +1,8 @@
 # liblite3client
 
+![lite3client logo](lite3client_logo.png "")
+
+
 A modern C++20 client library for the **Lite3** Key-Value Service.
 
 ## Features
