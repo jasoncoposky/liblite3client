@@ -1,4 +1,4 @@
-#include "lite3/client.hpp"
+#include "lite3-cpp/client.hpp"
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -192,7 +192,7 @@ Result<void> Client::put(std::string_view key, const lite3cpp::Buffer &buf) {
   return Result<void>();
 }
 
-Result<lite3cpp::Buffer> Client::get(std::string_view key) {
+Result<std::vector<uint8_t>> Client::get(std::string_view key) {
   if (key.empty())
     return Error{ErrorCode::BadRequest, "Key cannot be empty"};
   std::string path = "/kv/";
@@ -201,7 +201,8 @@ Result<lite3cpp::Buffer> Client::get(std::string_view key) {
   auto res = impl_->perform_request(http::verb::get, path);
   if (!res)
     return res.error();
-  return lite3cpp::Buffer(std::move(res.value()));
+
+  return std::move(res.value());
 }
 
 Result<void> Client::del(std::string_view key) {

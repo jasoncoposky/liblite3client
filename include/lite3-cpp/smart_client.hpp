@@ -1,7 +1,7 @@
 #pragma once
 
 #include "client.hpp"
-#include <lite3/ring.hpp>
+#include "lite3/ring.hpp"
 #include <map>
 #include <memory>
 #include <mutex>
@@ -20,7 +20,7 @@ public:
 
   Result<void> put(std::string_view key, std::string_view value);
   Result<void> put(std::string_view key, const lite3cpp::Buffer &buf);
-  Result<lite3cpp::Buffer> get(std::string_view key);
+  Result<std::vector<uint8_t>> get(std::string_view key);
   Result<void> del(std::string_view key);
 
   Result<void> patch_int(std::string_view key, std::string_view field,

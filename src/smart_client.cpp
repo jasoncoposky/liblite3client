@@ -1,9 +1,8 @@
-#include "lite3/smart_client.hpp"
-#include "lite3/ring.hpp" // Ensure ring is available
+#include "lite3-cpp/smart_client.hpp"
+#include "document.hpp"
+#include "json.hpp"
+#include "lite3/ring.hpp"
 #include <iostream>
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
 
 namespace lite3 {
 
@@ -18,47 +17,47 @@ Result<void> SmartClient::connect() {
 }
 
 Result<void> SmartClient::refresh_topology_unsafe() {
-  // Connect to seed
   try {
     Client seed(seed_host_, seed_port_);
-
-    // We need a way to do a raw GET request that isn't key-value based.
-    // The current Client interface exposes put/get/del for KV only.
-    // However, we can use the 'get' method with a special key if we hack it,
-    // OR we add a proper raw method to Client.
-    // HACK: The client::get appends "/kv/" to key.
-    // We need "/cluster/map".
-    // Let's rely on the implementation detail that we can path traverse?
-    // "/kv/../cluster/map" -> "/cluster/map" ?
-    // If server normalizes, maybe.
-
-    // BETTER: Add `Client::raw_get(path)` ?
-    // OR: Inherit Client logic.
-
-    // Let's assume we can add raw_get to Client later. For now, let's use the
-    // hack "ignore the prefix" if we can, but we can't easily. Since I am
-    // editing liblite3client anyway, I will add `raw_get` to Client.
-
-    // Wait, I can't invoke `refresh_topology_unsafe` without that change.
-    // I'll proceed assuming I adding `raw_get` to `Client` in the next step.
-
-    auto res = seed.impl_raw_get("/cluster/map"); // Need to expose this
+    auto res = seed.impl_raw_get("/cluster/map");
     if (!res)
       return res.error();
 
     auto body = res.value();
     std::string json_str(body.begin(), body.end());
-    json j = json::parse(json_str);
+    lite3cpp::Buffer buf = lite3cpp::lite3_json::from_json_string(json_str);
+    lite3cpp::Document doc(std::move(buf));
+    auto root = doc.root_obj();
 
-    // Rebuild ring
     ring_ = lite3::ConsistentHash();
     clients_.clear();
 
-    if (j.contains("peers") && j["peers"].is_array()) {
-      for (auto &p : j["peers"]) {
-        uint32_t id = p.value("id", 0u);
-        std::string host = p.value("host", "127.0.0.1");
-        int port = p.value("http_port", 8080);
+    if (root.contains("peers") &&
+        root["peers"].type() == lite3cpp::Type::Array) {
+      lite3cpp::Value peers_val = root["peers"];
+      auto &arr = static_cast<lite3cpp::Array &>(peers_val);
+      for (size_t i = 0; i < arr.size(); ++i) {
+        auto p = arr[static_cast<uint32_t>(i)];
+        if (p.type() != lite3cpp::Type::Object)
+          continue;
+
+        lite3cpp::Object p_obj = static_cast<lite3cpp::Object &>(p);
+
+        uint32_t id = 0;
+        if (p_obj["id"].type() == lite3cpp::Type::Int64)
+          id = static_cast<uint32_t>(static_cast<int64_t>(p_obj["id"]));
+
+        std::string host = "127.0.0.1";
+        if (p_obj["host"].type() == lite3cpp::Type::String) {
+          auto host_view = static_cast<std::string_view>(p_obj["host"]);
+          host = std::string(host_view.data(), host_view.size());
+          if (host == "0.0.0.0")
+            host = "127.0.0.1";
+        }
+
+        int port = 8080;
+        if (p_obj["http_port"].type() == lite3cpp::Type::Int64)
+          port = static_cast<int>(static_cast<int64_t>(p_obj["http_port"]));
 
         if (id != 0) {
           ring_.add_node(id);
@@ -102,7 +101,7 @@ Result<void> SmartClient::put(std::string_view key,
   return client->put(key, buf);
 }
 
-Result<lite3cpp::Buffer> SmartClient::get(std::string_view key) {
+Result<std::vector<uint8_t>> SmartClient::get(std::string_view key) {
   auto client = get_client_for_key(key);
   if (!client)
     return Error{ErrorCode::NetworkError, "No nodes available"};
