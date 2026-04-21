@@ -1,17 +1,8 @@
 #include "lite3-cpp/client.hpp"
-
-#include <boost/asio/connect.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/beast/version.hpp>
+#include <zmq.hpp>
+#include <zmq_addon.hpp>
 #include <iostream>
 #include <string>
-
-namespace beast = boost::beast; // from <boost/beast.hpp>
-namespace http = beast::http;   // from <boost/beast/http.hpp>
-namespace net = boost::asio;    // from <boost/asio.hpp>
-using tcp = net::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace lite3 {
 
@@ -19,137 +10,63 @@ namespace lite3 {
 
 class ClientImpl {
 public:
-  std::string host_;
-  std::string port_;
-  net::io_context ioc_;
-  tcp::resolver resolver_;
-  beast::tcp_stream stream_;
+  std::string endpoint_;
+  zmq::context_t context_;
+  zmq::socket_t socket_;
 
   ClientImpl(std::string_view host, int port)
-      : host_(host), port_(std::to_string(port)), ioc_(), resolver_(ioc_),
-        stream_(ioc_) {}
-
-  // Helper to parse URL: http://host:port/path
-  // Very basic for internal redirects
-  bool parse_location(const std::string &loc, std::string &out_host,
-                      int &out_port, std::string &out_target) {
-    if (loc.rfind("http://", 0) != 0)
-      return false;
-    auto host_start = loc.begin() + 7;
-    auto port_sep = std::find(host_start, loc.end(), ':');
-    if (port_sep == loc.end())
-      return false;
-    auto path_sep = std::find(port_sep, loc.end(), '/');
-
-    out_host = std::string(host_start, port_sep);
-    std::string port_str(port_sep + 1, path_sep);
-    try {
-      out_port = std::stoi(port_str);
-    } catch (...) {
-      return false;
-    }
-
-    if (path_sep != loc.end())
-      out_target = std::string(path_sep, loc.end());
-    else
-      out_target = "/";
-    return true;
+      : context_(1), socket_(context_, ZMQ_DEALER) {
+    endpoint_ = "tcp://" + std::string(host) + ":" + std::to_string(port);
+    socket_.connect(endpoint_);
+    
+    // Set socket options for performance
+    int linger = 0;
+    socket_.set(zmq::sockopt::linger, linger);
+    socket_.set(zmq::sockopt::sndhwm, 10000);
+    socket_.set(zmq::sockopt::rcvhwm, 10000);
   }
 
-  // Helper to perform a single request
-  // Beast is lower-level; we need to connect, write, read.
-  // Ideally we keep the connection open (Keep-Alive).
+  ~ClientImpl() {
+    socket_.close();
+  }
+
   Result<std::vector<uint8_t>>
-  perform_request(http::verb method, std::string_view target,
-                  const std::vector<uint8_t> &body = {}, int depth = 0) {
-    if (depth > 5) {
-      return Error{ErrorCode::NetworkError, "Too many redirects"};
-    }
-
+  perform_op(char opcode, std::string_view key, const std::vector<uint8_t> &body = {}) {
     try {
-      // Check if connected, if not connect.
-      if (!stream_.socket().is_open()) {
-        // std::cout << "Client: Reconnecting to " << host_ << ":" << port_ <<
-        // "\n"; // DEBUG
-        connect();
-      }
-
-      // Set up an HTTP request message
-      http::request<http::vector_body<uint8_t>> req{method, std::string(target),
-                                                    11};
-      req.set(http::field::host, host_);
-      req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
-      req.set(http::field::content_type, "application/octet-stream");
-      req.keep_alive(true);
-      if (!body.empty()) {
-        req.body() = body;
-        req.prepare_payload();
+      // ZeroMQ DEALER framing (DEALER automatically adds identity if needed, but we start with empty delimiter for the ROUTER)
+      socket_.send(zmq::message_t(), zmq::send_flags::sndmore); // Delimiter
+      socket_.send(zmq::message_t(&opcode, 1), zmq::send_flags::sndmore); // OpCode
+      
+      if (opcode == 'B') {
+          // Batch Payload
+          socket_.send(zmq::message_t(body.data(), body.size()), zmq::send_flags::none);
       } else {
-        req.prepare_payload();
-      }
-
-      // Send the HTTP request to the remote host
-      http::write(stream_, req);
-
-      // This buffer is used for reading and must be persisted
-      beast::flat_buffer buffer;
-
-      // Declare a container to hold the response
-      http::response<http::vector_body<uint8_t>> res;
-
-      // Receive the HTTP response
-      http::read(stream_, buffer, res);
-
-      // Handle status codes
-      if (res.result() == http::status::ok) {
-        return std::move(res.body());
-      } else if (res.result() == http::status::temporary_redirect) {
-        // Follow Redirect
-        auto loc_it = res.find(http::field::location);
-        if (loc_it != res.end()) {
-          std::string location(loc_it->value());
-          std::string new_host;
-          int new_port = 0;
-          std::string new_target;
-          if (parse_location(location, new_host, new_port, new_target)) {
-            // Create one-off client to follow redirect
-            // We don't want to close OUR connection.
-            ClientImpl temp_client(new_host, new_port);
-            return temp_client.perform_request(method, new_target, body,
-                                               depth + 1);
+          socket_.send(zmq::message_t(key.data(), key.size()), body.empty() ? zmq::send_flags::none : zmq::send_flags::sndmore);
+          if (!body.empty()) {
+              socket_.send(zmq::message_t(body.data(), body.size()), zmq::send_flags::none);
           }
-        }
-        return Error{ErrorCode::ServerError, "Invalid Redirect Location"};
-
-      } else if (res.result() == http::status::not_found) {
-        return Error{ErrorCode::NotFound, "Key not found"};
-      } else {
-        return Error{ErrorCode::ServerError,
-                     "Server error: " + std::to_string(res.result_int())};
       }
 
-    } catch (const std::exception &e) {
-      // If we failed, maybe connection closed? specific logic could go here.
-      // For now, return network error.
-      // Try to close gracefully if possible
-      beast::error_code ec;
-      stream_.socket().shutdown(tcp::socket::shutdown_both, ec);
-      stream_.close();
+      // Receive Response
+      std::vector<zmq::message_t> recv_msgs;
+      auto received = zmq::recv_multipart(socket_, std::back_inserter(recv_msgs));
+      if (!received || recv_msgs.size() < 2) {
+          return Error{ErrorCode::NetworkError, "No response from ZMQ server"};
+      }
 
+      // First frame is the empty delimiter (matched to our request)
+      auto& resp_msg = recv_msgs[1];
+      
+      if (resp_msg.to_string() == "Key not found") {
+          return Error{ErrorCode::NotFound, "Key not found"};
+      }
+
+      std::vector<uint8_t> result(static_cast<uint8_t*>(resp_msg.data()), 
+                                  static_cast<uint8_t*>(resp_msg.data()) + resp_msg.size());
+      return result;
+    } catch (const std::exception &e) {
       return Error{ErrorCode::NetworkError, e.what()};
     }
-  }
-
-  void connect() {
-    auto const results = resolver_.resolve(host_, port_);
-    stream_.connect(results);
-    stream_.socket().set_option(tcp::no_delay(true));
-  }
-
-  // Explicitly close
-  void close() {
-    beast::error_code ec;
-    stream_.socket().shutdown(tcp::socket::shutdown_both, ec);
   }
 };
 
@@ -166,11 +83,9 @@ Client &Client::operator=(Client &&) noexcept = default;
 Result<void> Client::put(std::string_view key, std::string_view value) {
   if (key.empty())
     return Error{ErrorCode::BadRequest, "Key cannot be empty"};
-  std::string path = "/kv/";
-  path.append(key);
 
   std::vector<uint8_t> vec(value.begin(), value.end());
-  auto res = impl_->perform_request(http::verb::put, path, vec);
+  auto res = impl_->perform_op('P', key, vec);
   if (!res) {
     return Result<void>(res.error());
   }
@@ -180,25 +95,35 @@ Result<void> Client::put(std::string_view key, std::string_view value) {
 Result<void> Client::put(std::string_view key, const lite3cpp::Buffer &buf) {
   if (key.empty())
     return Error{ErrorCode::BadRequest, "Key cannot be empty"};
-  std::string path = "/kv/";
-  path.append(key);
 
-  // Buffer data is already a vector<uint8_t>
   std::vector<uint8_t> vec(buf.data(), buf.data() + buf.size());
-  auto res = impl_->perform_request(http::verb::put, path, vec);
+  auto res = impl_->perform_op('P', key, vec);
   if (!res) {
     return Result<void>(res.error());
   }
   return Result<void>();
 }
 
+Result<void> Client::batch_put(const lite3cpp::Buffer &batch) {
+  std::vector<uint8_t> vec(batch.data(), batch.data() + batch.size());
+  auto res = impl_->perform_op('B', "", vec);
+  if (!res) {
+    return Result<void>(res.error());
+  }
+  return Result<void>();
+}
+
+Result<std::vector<uint8_t>> Client::batch_get(const lite3cpp::Buffer &batch) {
+  // Batch GET uses same framing but OpCode 'G' with payload (multi-key)
+  std::vector<uint8_t> vec(batch.data(), batch.data() + batch.size());
+  return impl_->perform_op('G', "", vec);
+}
+
 Result<std::vector<uint8_t>> Client::get(std::string_view key) {
   if (key.empty())
     return Error{ErrorCode::BadRequest, "Key cannot be empty"};
-  std::string path = "/kv/";
-  path.append(key);
 
-  auto res = impl_->perform_request(http::verb::get, path);
+  auto res = impl_->perform_op('G', key);
   if (!res)
     return res.error();
 
@@ -208,12 +133,8 @@ Result<std::vector<uint8_t>> Client::get(std::string_view key) {
 Result<void> Client::del(std::string_view key) {
   if (key.empty())
     return Error{ErrorCode::BadRequest, "Key cannot be empty"};
-  std::string path = "/kv/";
-  path.append(key);
 
-  // DELETE usually returns 200 or 404. Our helper returns error on 404.
-  // We should treat 404 as success for delete (idempotency).
-  auto res = impl_->perform_request(http::verb::delete_, path);
+  auto res = impl_->perform_op('D', key); // OpCode 'D' for delete
   if (!res) {
     if (res.error().code == ErrorCode::NotFound)
       return Result<void>();
@@ -224,42 +145,17 @@ Result<void> Client::del(std::string_view key) {
 
 Result<void> Client::patch_int(std::string_view key, std::string_view field,
                                int64_t value) {
-  if (key.empty())
-    return Error{ErrorCode::BadRequest, "Key cannot be empty"};
-
-  std::string path = "/kv/";
-  path.append(key);
-  path += "?op=set_int&field=" + std::string(field) +
-          "&val=" + std::to_string(value);
-
-  auto res = impl_->perform_request(http::verb::post, path);
-  if (!res)
-    return Result<void>(res.error());
-  return Result<void>();
+  // PATCH is not yet fully implemented in ZmqServer, for now we skip or return error
+  return Error{ErrorCode::Unknown, "PATCH_INT not implemented in ZeroMQ mode"};
 }
 
 Result<void> Client::patch_str(std::string_view key, std::string_view field,
                                std::string_view value) {
-  if (key.empty())
-    return Error{ErrorCode::BadRequest, "Key cannot be empty"};
-
-  std::string path = "/kv/";
-  path.append(key);
-  // Simple URL parameter construction (assuming safe characters for benchmark)
-  path +=
-      "?op=set_str&field=" + std::string(field) + "&val=" + std::string(value);
-
-  auto res = impl_->perform_request(http::verb::post, path);
-  if (!res)
-    return Result<void>(res.error());
-  return Result<void>();
+  return Error{ErrorCode::Unknown, "PATCH_STR not implemented in ZeroMQ mode"};
 }
 
 Result<std::vector<uint8_t>> Client::impl_raw_get(std::string_view path) {
-  auto res = impl_->perform_request(http::verb::get, path);
-  if (!res)
-    return res.error();
-  return std::move(res.value());
+    return Error{ErrorCode::Unknown, "RAW_GET not supported in ZeroMQ mode"};
 }
 
 } // namespace lite3

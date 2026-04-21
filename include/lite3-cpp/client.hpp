@@ -35,6 +35,7 @@ template <typename T> class Result {
   std::variant<T, Error> val_;
 
 public:
+  Result() : val_(Error{ErrorCode::Unknown, "Default constructed"}) {}
   Result(T val) : val_(std::move(val)) {}
   Result(Error err) : val_(std::move(err)) {}
 
@@ -110,6 +111,8 @@ public:
   // Raw String/Bytes operations
   Result<void> put(std::string_view key, std::string_view value);
   Result<void> put(std::string_view key, const lite3cpp::Buffer &buf);
+  Result<void> batch_put(const lite3cpp::Buffer &batch);
+  Result<std::vector<uint8_t>> batch_get(const lite3cpp::Buffer &batch);
   Result<std::vector<uint8_t>> get(std::string_view key);
   Result<void> del(std::string_view key);
 
